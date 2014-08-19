@@ -224,6 +224,12 @@ retry:
 		goto retry
 	}
 
+	// If buf has more room than the next chunk then reslice at the chunk size
+	// otherwise .Read will read into the header for the next chunk.
+	if len(buf) > int(cnt) {
+		buf = buf[:cnt]
+	}
+
 	target := int(cnt)
 
 	if len(buf) < target {
