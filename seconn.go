@@ -1,6 +1,7 @@
 package seconn
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -16,6 +17,11 @@ import (
 // The size of the internal encrypted write buffer
 var WriteBufferSize = 128
 
+// How many bytes to write over the connection before we rekey
+// This is bidirectional, so it will trip whenever either side
+// has sent this ammount.
+var RekeyAfterBytes = 1024 * 1024
+
 type Conn struct {
 	net.Conn
 	privKey *[32]byte
@@ -25,7 +31,10 @@ type Conn struct {
 	readS   cipher.Stream
 	writeS  cipher.Stream
 
-	writeBuf []byte
+	server    bool
+	writeBuf  []byte
+	readBuf   bytes.Buffer
+	rekeyLeft int
 }
 
 // Generate new public and private keys. Automatically called by Negotiate
@@ -46,15 +55,8 @@ func GenerateKey(rand io.Reader) (publicKey, privateKey *[32]byte, err error) {
 // Create a new connection. Negotiate must be called before the
 // connection can be used.
 func NewConn(c net.Conn) (*Conn, error) {
-	pub, priv, err := GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-
 	conn := &Conn{
 		Conn:     c,
-		privKey:  priv,
-		pubKey:   pub,
 		writeBuf: make([]byte, 128),
 	}
 
@@ -85,9 +87,24 @@ func NewServer(u net.Conn) (*Conn, error) {
 	return c, nil
 }
 
+// On the next Write(), rekey the stream
+func (c *Conn) RekeyNext() {
+	c.rekeyLeft = 0
+}
+
 // Exchange keys and setup the encryption
 func (c *Conn) Negotiate(server bool) error {
-	err := binary.Write(c.Conn, binary.BigEndian, uint32(len(c.pubKey)))
+	pub, priv, err := GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+
+	c.pubKey = pub
+	c.privKey = priv
+
+	c.server = server
+
+	err = binary.Write(c.Conn, binary.BigEndian, uint32(len(c.pubKey)))
 	if err != nil {
 		return err
 	}
@@ -182,25 +199,80 @@ func (c *Conn) Negotiate(server bool) error {
 		return errors.New("unable to create stream cipher")
 	}
 
+	c.rekeyLeft = RekeyAfterBytes
 	return nil
 }
 
 // Read data, automatically decrypting it as read
 func (c *Conn) Read(buf []byte) (int, error) {
-	n, err := c.Conn.Read(buf)
+	n, err := c.readBuf.Read(buf)
+
+	if n > 0 {
+		c.readS.XORKeyStream(buf[:n], buf[:n])
+		return n, nil
+	}
+
+retry:
+	var cnt uint32
+	err = binary.Read(c.Conn, binary.BigEndian, &cnt)
 	if err != nil {
 		return 0, err
 	}
 
-	c.readS.XORKeyStream(buf[:n], buf[:n])
+	if cnt == 0 {
+		c.Negotiate(c.server)
+		goto retry
+	}
 
-	return n, err
+	target := int(cnt)
+
+	if len(buf) < target {
+		target = len(buf)
+	}
+
+	cur := buf
+
+	for {
+		n, err := c.Conn.Read(cur)
+		if err != nil {
+			return 0, err
+		}
+
+		if n == target {
+			break
+		}
+
+		cur = cur[n:]
+	}
+
+	c.readS.XORKeyStream(buf[:target], buf[:target])
+
+	// drain the rest of the segment into readBuf
+	if target < int(cnt) {
+		io.CopyN(&c.readBuf, c.Conn, int64(int(cnt)-target))
+	}
+
+	return target, err
 }
 
 // Write data, automatically encrypting it
 func (c *Conn) Write(buf []byte) (int, error) {
+	if c.rekeyLeft <= 0 {
+		err := binary.Write(c.Conn, binary.BigEndian, uint32(0))
+		if err != nil {
+			return 0, err
+		}
+
+		c.Negotiate(c.server)
+	}
+
 	left := len(buf)
 	cur := 0
+
+	err := binary.Write(c.Conn, binary.BigEndian, uint32(len(buf)))
+	if err != nil {
+		return 0, err
+	}
 
 	for {
 		if left <= len(c.writeBuf) {

@@ -184,3 +184,120 @@ func TestSeconnCanSendMessage(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestSeconnReKey(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	defer l.Close()
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		o, err := l.Accept()
+		defer o.Close()
+
+		wo, err := NewServer(o)
+		assert.NoError(t, err)
+
+		n, err := wo.Write([]byte("hello"))
+		assert.NoError(t, err)
+		assert.Equal(t, 5, n)
+
+		wo.RekeyNext()
+
+		n, err = wo.Write([]byte("hello"))
+		assert.NoError(t, err)
+		assert.Equal(t, 5, n)
+	}()
+
+	c, err := net.Dial("tcp", l.Addr().String())
+	defer c.Close()
+
+	wc, err := NewClient(c)
+	assert.NoError(t, err)
+
+	buf := make([]byte, 5)
+
+	firstKey := make([]byte, 32)
+
+	copy(firstKey, (*wc.shared)[:])
+
+	n, err := wc.Read(buf)
+	assert.Equal(t, 5, n)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("hello"), buf[:n])
+
+	n, err = wc.Read(buf)
+	assert.Equal(t, 5, n)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("hello"), buf[:n])
+
+	secondKey := (*wc.shared)[:]
+
+	assert.NotEqual(t, firstKey, secondKey)
+
+	wg.Wait()
+}
+
+func TestSeconnReadBuffersProperly(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	defer l.Close()
+
+	data := make([]byte, WriteBufferSize+(WriteBufferSize/2))
+
+	n, err := io.ReadFull(rand.Reader, data)
+	assert.NoError(t, err)
+
+	if n != len(data) {
+		panic("couldn't get enough data")
+	}
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		o, err := l.Accept()
+		defer o.Close()
+
+		wo, err := NewConn(o)
+		assert.NoError(t, err)
+
+		err = wo.Negotiate(true)
+		assert.NoError(t, err)
+
+		n, err := wo.Write(data)
+		assert.NoError(t, err)
+		assert.Equal(t, len(data), n)
+	}()
+
+	c, err := net.Dial("tcp", l.Addr().String())
+	defer c.Close()
+
+	wc, err := NewConn(c)
+	assert.NoError(t, err)
+
+	err = wc.Negotiate(false)
+	assert.NoError(t, err)
+
+	buf := make([]byte, 16)
+
+	n, err = wc.Read(buf)
+	assert.NoError(t, err)
+	assert.Equal(t, data[:n], buf[:n])
+
+	assert.Equal(t, len(data)-16, len(wc.readBuf.Bytes()))
+
+	buf = make([]byte, len(data))
+
+	n, err = wc.Read(buf)
+	assert.NoError(t, err)
+	assert.Equal(t, data[16:], buf[:n])
+	assert.Equal(t, 0, wc.readBuf.Len())
+
+	wg.Wait()
+}
