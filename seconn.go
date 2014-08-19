@@ -3,6 +3,7 @@ package seconn
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
@@ -22,7 +23,8 @@ type Conn struct {
 	pubKey  *[32]byte
 	peerKey *[32]byte
 	shared  *[32]byte
-	stream  cipher.Stream
+	readS   cipher.Stream
+	writeS  cipher.Stream
 
 	writeBuf []byte
 }
@@ -171,12 +173,15 @@ func (c *Conn) Negotiate(server bool) error {
 		}
 	}
 
-	stream := cipher.NewOFB(block, iv)
-	if stream == nil {
+	c.readS = cipher.NewOFB(block, iv)
+	if c.readS == nil {
 		return errors.New("unable to create stream cipher")
 	}
 
-	c.stream = stream
+	c.writeS = cipher.NewOFB(block, iv)
+	if c.writeS == nil {
+		return errors.New("unable to create stream cipher")
+	}
 
 	return nil
 }
@@ -188,7 +193,8 @@ func (c *Conn) Read(buf []byte) (int, error) {
 		return 0, err
 	}
 
-	c.stream.XORKeyStream(buf[:n], buf[:n])
+	c.readS.XORKeyStream(buf[:n], buf[:n])
+
 	return n, err
 }
 
@@ -197,9 +203,11 @@ func (c *Conn) Write(buf []byte) (int, error) {
 	left := len(buf)
 	cur := 0
 
+	fmt.Printf("writing: %#v\n", buf)
+
 	for {
 		if left <= len(c.writeBuf) {
-			c.stream.XORKeyStream(c.writeBuf, buf[cur:])
+			c.writeS.XORKeyStream(c.writeBuf, buf[cur:])
 
 			n, err := c.Conn.Write(c.writeBuf[:left])
 			if err != nil {
@@ -212,7 +220,7 @@ func (c *Conn) Write(buf []byte) (int, error) {
 
 			break
 		} else {
-			c.stream.XORKeyStream(c.writeBuf, buf[cur:cur+len(c.writeBuf)])
+			c.writeS.XORKeyStream(c.writeBuf, buf[cur:cur+len(c.writeBuf)])
 
 			n, err := c.Conn.Write(c.writeBuf)
 			if err != nil {
