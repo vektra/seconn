@@ -3,7 +3,6 @@ package seconn
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 
@@ -202,8 +201,6 @@ func (c *Conn) Read(buf []byte) (int, error) {
 func (c *Conn) Write(buf []byte) (int, error) {
 	left := len(buf)
 	cur := 0
-
-	fmt.Printf("writing: %#v\n", buf)
 
 	for {
 		if left <= len(c.writeBuf) {
