@@ -75,7 +75,7 @@ func NewClient(u net.Conn) (*Conn, error) {
 	return c, nil
 }
 
-// Create a new connection and negotiate as the client
+// Create a new connection and negotiate as the server
 func NewServer(u net.Conn) (*Conn, error) {
 	c, err := NewConn(u)
 	if err != nil {
