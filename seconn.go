@@ -13,6 +13,7 @@ import (
 	"code.google.com/p/go.crypto/curve25519"
 )
 
+// The size of the internal encrypted write buffer
 var WriteBufferSize = 128
 
 type Conn struct {
@@ -26,6 +27,7 @@ type Conn struct {
 	writeBuf []byte
 }
 
+// Generate new public and private keys. Automatically called by Negotiate
 func GenerateKey(rand io.Reader) (publicKey, privateKey *[32]byte, err error) {
 	publicKey = new([32]byte)
 	privateKey = new([32]byte)
@@ -40,6 +42,8 @@ func GenerateKey(rand io.Reader) (publicKey, privateKey *[32]byte, err error) {
 	return
 }
 
+// Create a new connection. Negotiate must be called before the
+// connection can be used.
 func NewConn(c net.Conn) (*Conn, error) {
 	pub, priv, err := GenerateKey(rand.Reader)
 	if err != nil {
@@ -56,6 +60,7 @@ func NewConn(c net.Conn) (*Conn, error) {
 	return conn, nil
 }
 
+// Create a new connection and negotiate as the client
 func NewClient(u net.Conn) (*Conn, error) {
 	c, err := NewConn(u)
 	if err != nil {
@@ -67,6 +72,7 @@ func NewClient(u net.Conn) (*Conn, error) {
 	return c, nil
 }
 
+// Create a new connection and negotiate as the client
 func NewServer(u net.Conn) (*Conn, error) {
 	c, err := NewConn(u)
 	if err != nil {
@@ -78,6 +84,7 @@ func NewServer(u net.Conn) (*Conn, error) {
 	return c, nil
 }
 
+// Exchange keys and setup the encryption
 func (c *Conn) Negotiate(server bool) error {
 	err := binary.Write(c.Conn, binary.BigEndian, uint32(len(c.pubKey)))
 	if err != nil {
@@ -174,6 +181,7 @@ func (c *Conn) Negotiate(server bool) error {
 	return nil
 }
 
+// Read data, automatically decrypting it as read
 func (c *Conn) Read(buf []byte) (int, error) {
 	n, err := c.Conn.Read(buf)
 	if err != nil {
@@ -184,6 +192,7 @@ func (c *Conn) Read(buf []byte) (int, error) {
 	return n, err
 }
 
+// Write data, automatically encrypting it
 func (c *Conn) Write(buf []byte) (int, error) {
 	left := len(buf)
 	cur := 0
@@ -222,6 +231,7 @@ func (c *Conn) Write(buf []byte) (int, error) {
 	return len(buf), nil
 }
 
+// Read a message as a []byte
 func (c *Conn) GetMessage() ([]byte, error) {
 	l := uint32(0)
 
@@ -244,6 +254,7 @@ func (c *Conn) GetMessage() ([]byte, error) {
 	return buf, nil
 }
 
+// Write msg to the other side
 func (c *Conn) SendMessage(msg []byte) error {
 	err := binary.Write(c, binary.BigEndian, uint32(len(msg)))
 	if err != nil {
