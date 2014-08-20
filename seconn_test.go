@@ -186,7 +186,7 @@ func TestSeconnCanSendMessage(t *testing.T) {
 	wg.Wait()
 }
 
-func TestSeconnReKey(t *testing.T) {
+func TestSeconnReKeyBasic(t *testing.T) {
 	l, err := net.Listen("tcp", ":0")
 	defer l.Close()
 
@@ -202,15 +202,29 @@ func TestSeconnReKey(t *testing.T) {
 		wo, err := NewServer(o)
 		assert.NoError(t, err)
 
-		n, err := wo.Write([]byte("hello"))
+		n, err := wo.Write([]byte("hello 1"))
 		assert.NoError(t, err)
-		assert.Equal(t, 5, n)
+		assert.Equal(t, 7, n)
 
 		wo.RekeyNext()
 
-		n, err = wo.Write([]byte("hello"))
+		n, err = wo.Write([]byte("hello 2"))
 		assert.NoError(t, err)
-		assert.Equal(t, 5, n)
+		assert.Equal(t, 7, n)
+
+		buf := make([]byte, 7)
+
+		n, err = wo.Read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, 7, n)
+
+		n, err = wo.Write([]byte("hello 4"))
+		assert.NoError(t, err)
+		assert.Equal(t, 7, n)
+
+		n, err = wo.Read(buf)
+		assert.NoError(t, err)
+		assert.Equal(t, 7, n)
 	}()
 
 	c, err := net.Dial("tcp", l.Addr().String())
@@ -219,21 +233,34 @@ func TestSeconnReKey(t *testing.T) {
 	wc, err := NewClient(c)
 	assert.NoError(t, err)
 
-	buf := make([]byte, 5)
+	buf := make([]byte, 7)
 
 	firstKey := make([]byte, 32)
 
 	copy(firstKey, (*wc.shared)[:])
 
 	n, err := wc.Read(buf)
-	assert.Equal(t, 5, n)
+	assert.Equal(t, 7, n)
 	assert.NoError(t, err)
-	assert.Equal(t, []byte("hello"), buf[:n])
+	assert.Equal(t, []byte("hello 1"), buf[:n])
 
 	n, err = wc.Read(buf)
-	assert.Equal(t, 5, n)
+	assert.Equal(t, 7, n)
 	assert.NoError(t, err)
-	assert.Equal(t, []byte("hello"), buf[:n])
+	assert.Equal(t, []byte("hello 2"), buf[:n])
+
+	n, err = wc.Write([]byte("hello 3"))
+	assert.NoError(t, err)
+	assert.Equal(t, 7, n)
+
+	n, err = wc.Read(buf)
+	assert.Equal(t, 7, n)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("hello 4"), buf[:n])
+
+	n, err = wc.Write([]byte("hello 5"))
+	assert.NoError(t, err)
+	assert.Equal(t, 7, n)
 
 	secondKey := (*wc.shared)[:]
 
