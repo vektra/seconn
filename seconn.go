@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"hash"
 	"io"
 	"net"
 
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 
 	"code.google.com/p/go.crypto/curve25519"
 )
@@ -22,19 +26,83 @@ var WriteBufferSize = 128
 // has sent this ammount.
 var RekeyAfterBytes = 1024 * 1024
 
+var ErrBadMac = errors.New("bad mac detected")
+
 type Conn struct {
 	net.Conn
 	privKey *[32]byte
 	pubKey  *[32]byte
 	peerKey *[32]byte
 	shared  *[32]byte
-	readS   cipher.Stream
-	writeS  cipher.Stream
 
 	server    bool
 	writeBuf  []byte
 	readBuf   bytes.Buffer
 	rekeyLeft int
+
+	read  *half
+	write *half
+}
+
+type half struct {
+	stream cipher.Stream
+	seq    []byte
+	dbuf   []byte
+	digest []byte
+	hash   hash.Hash
+}
+
+func (h *half) setup(key, iv []byte) error {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+
+	stream := cipher.NewOFB(block, iv)
+	if stream == nil {
+		return errors.New("unable to create stream cipher")
+	}
+
+	h.stream = stream
+	h.seq = make([]byte, 8)
+	h.hash = hmac.New(sha256.New, key)
+	h.digest = make([]byte, h.hash.Size())
+	h.dbuf = make([]byte, h.hash.Size())
+
+	return nil
+}
+
+func (h *half) incSeq() {
+	for i := 0; i < len(h.seq); i++ {
+		c := h.seq[i]
+		h.seq[i] = c + 1
+
+		if c < 255 {
+			return
+		}
+	}
+}
+
+func (h *half) macStart(header []byte) {
+	h.hash.Reset()
+	h.hash.Write(h.seq)
+	h.hash.Write(header)
+}
+
+func (h *half) macPayload(payload []byte) {
+	h.hash.Write(payload)
+}
+
+func (h *half) macFinish() []byte {
+	return h.hash.Sum(h.digest[:0])
+}
+
+func (h *half) mac(header, payload []byte) []byte {
+	h.hash.Reset()
+	h.hash.Write(h.seq)
+	h.hash.Write(header)
+	h.hash.Write(payload)
+	return h.hash.Sum(h.digest[:0])
 }
 
 // Generate new public and private keys. Automatically called by Negotiate
@@ -140,11 +208,6 @@ func (c *Conn) Negotiate(server bool) error {
 
 	curve25519.ScalarMult(c.shared, c.privKey, c.peerKey)
 
-	block, err := aes.NewCipher((*c.shared)[:])
-	if err != nil {
-		return err
-	}
-
 	var iv []byte
 
 	if server {
@@ -189,129 +252,201 @@ func (c *Conn) Negotiate(server bool) error {
 		}
 	}
 
-	c.readS = cipher.NewOFB(block, iv)
-	if c.readS == nil {
-		return errors.New("unable to create stream cipher")
-	}
-
-	c.writeS = cipher.NewOFB(block, iv)
-	if c.writeS == nil {
-		return errors.New("unable to create stream cipher")
-	}
-
 	c.rekeyLeft = RekeyAfterBytes
+
+	c.read = &half{}
+	c.write = &half{}
+
+	sharedKey := (*c.shared)[:]
+
+	c.read.setup(sharedKey, iv)
+	c.write.setup(sharedKey, iv)
+
 	return nil
 }
 
-// Read data, automatically decrypting it as read
+// Read data into buf, automatically decrypting it
 func (c *Conn) Read(buf []byte) (int, error) {
 	n, err := c.readBuf.Read(buf)
-
 	if n > 0 {
-		c.readS.XORKeyStream(buf[:n], buf[:n])
-		return n, nil
+		return n, err
 	}
 
+	var headerData [4]byte
+
+	header := headerData[:]
+
 retry:
-	var cnt uint32
-	err = binary.Read(c.Conn, binary.BigEndian, &cnt)
+
+	n, err = io.ReadFull(c.Conn, header)
 	if err != nil {
 		return 0, err
 	}
+
+	if n != 4 {
+		return 0, io.ErrShortBuffer
+	}
+
+	c.read.macStart(header)
+
+	c.read.stream.XORKeyStream(header, header)
+
+	cnt := binary.BigEndian.Uint32(header)
 
 	if cnt == 0 {
 		c.Negotiate(c.server)
 		goto retry
 	}
 
-	// If buf has more room than the next chunk then reslice at the chunk size
-	// otherwise .Read will read into the header for the next chunk.
-	if len(buf) > int(cnt) {
-		buf = buf[:cnt]
-	}
-
-	target := int(cnt)
-
-	if len(buf) < target {
-		target = len(buf)
-	}
-
-	cur := buf
-
-	for {
-		n, err := c.Conn.Read(cur)
+	if len(buf) < int(cnt) {
+		io.CopyN(&c.readBuf, c.Conn, int64(cnt))
+		c.read.macPayload(c.readBuf.Bytes())
+	} else {
+		n, err = io.ReadFull(c.Conn, buf[:cnt])
 		if err != nil {
 			return 0, err
 		}
 
-		if n == target {
-			break
+		if n != int(cnt) {
+			return 0, io.ErrShortBuffer
 		}
 
-		cur = cur[n:]
+		c.read.macPayload(buf[:cnt])
 	}
 
-	c.readS.XORKeyStream(buf[:target], buf[:target])
-
-	// drain the rest of the segment into readBuf
-	if target < int(cnt) {
-		io.CopyN(&c.readBuf, c.Conn, int64(int(cnt)-target))
+	n, err = io.ReadFull(c.Conn, c.read.dbuf)
+	if err != nil {
+		return 0, err
 	}
 
-	return target, err
+	if n != len(c.read.dbuf) {
+		return 0, io.ErrShortBuffer
+	}
+
+	// fmt.Printf("header: %#v\nbody: %#v", header, buf[:cnt])
+	localMac := c.read.macFinish()
+
+	// fmt.Printf("local: %#v\nremote: %#v\n", localMac, c.read.dbuf)
+
+	// fmt.Printf("macs: %d <=> %d\n", len(localMac), len(c.read.dbuf))
+
+	if subtle.ConstantTimeCompare(localMac, c.read.dbuf) != 1 {
+		c.readBuf.Reset()
+		return 0, ErrBadMac
+	}
+
+	var read int
+
+	if len(buf) < int(cnt) {
+		c.read.stream.XORKeyStream(c.readBuf.Bytes(), c.readBuf.Bytes())
+		read, err = c.readBuf.Read(buf)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		read = int(cnt)
+		c.read.stream.XORKeyStream(buf[:cnt], buf[:cnt])
+	}
+
+	c.read.incSeq()
+
+	return read, nil
 }
 
 // Write data, automatically encrypting it
 func (c *Conn) Write(buf []byte) (int, error) {
+	var headerData [4]byte
+
+	header := headerData[:]
+
 	if c.rekeyLeft <= 0 {
-		err := binary.Write(c.Conn, binary.BigEndian, uint32(0))
+		binary.BigEndian.PutUint32(header, uint32(0))
+		c.write.stream.XORKeyStream(header, header)
+
+		n, err := c.Conn.Write(header)
 		if err != nil {
 			return 0, err
+		}
+
+		if n != len(header) {
+			return 0, io.ErrShortWrite
 		}
 
 		c.Negotiate(c.server)
 	}
 
-	left := len(buf)
-	cur := 0
+	binary.BigEndian.PutUint32(header, uint32(len(buf)))
 
-	err := binary.Write(c.Conn, binary.BigEndian, uint32(len(buf)))
+	c.write.stream.XORKeyStream(header, header)
+
+	c.write.macStart(header)
+
+	n, err := c.Conn.Write(header)
 	if err != nil {
 		return 0, err
 	}
 
+	if n != len(header) {
+		return 0, io.ErrShortWrite
+	}
+
+	total := len(buf)
+
 	for {
-		if left <= len(c.writeBuf) {
-			c.writeS.XORKeyStream(c.writeBuf, buf[cur:])
+		if len(c.writeBuf) >= len(buf) {
+			wb := c.writeBuf[:len(buf)]
 
-			n, err := c.Conn.Write(c.writeBuf[:left])
+			c.write.stream.XORKeyStream(wb, buf)
+
+			n, err = c.Conn.Write(wb)
 			if err != nil {
 				return 0, err
 			}
 
-			if n != left {
+			if n != len(wb) {
 				return 0, io.ErrShortWrite
 			}
 
+			c.write.macPayload(wb)
 			break
-		} else {
-			c.writeS.XORKeyStream(c.writeBuf, buf[cur:cur+len(c.writeBuf)])
 
-			n, err := c.Conn.Write(c.writeBuf)
+		} else {
+			wb := c.writeBuf
+
+			c.write.stream.XORKeyStream(wb, buf[:len(c.writeBuf)])
+
+			n, err = c.Conn.Write(wb)
 			if err != nil {
 				return 0, err
 			}
 
-			if n != len(c.writeBuf) {
+			if n != len(wb) {
 				return 0, io.ErrShortWrite
 			}
 
-			cur += n
-			left -= n
+			c.write.macPayload(wb)
+
+			buf = buf[len(c.writeBuf):]
 		}
 	}
 
-	return len(buf), nil
+	cmac := c.write.macFinish()
+
+	// fmt.Printf("header: %#v\nbody: %#v", header, wb)
+	// fmt.Printf("cmac: %#v\n", cmac)
+
+	n, err = c.Conn.Write(cmac)
+	if err != nil {
+		return 0, err
+	}
+
+	if n != len(cmac) {
+		return 0, io.ErrShortWrite
+	}
+
+	c.write.incSeq()
+
+	return total, nil
 }
 
 // Read a message as a []byte

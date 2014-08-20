@@ -41,8 +41,8 @@ func TestSeconnBasic(t *testing.T) {
 	buf := make([]byte, 10)
 
 	n, err := wc.Read(buf)
-	assert.Equal(t, 5, n)
 	assert.NoError(t, err)
+	assert.Equal(t, 5, n)
 	assert.Equal(t, []byte("hello"), buf[:n])
 
 	wg.Wait()
