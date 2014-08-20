@@ -436,3 +436,51 @@ func TestSeconnYamuxSimilar(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestSeconnReKeyDoesntSwitchTooEarly(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	defer l.Close()
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		o, err := l.Accept()
+		defer o.Close()
+
+		wo, err := NewServer(o)
+		assert.NoError(t, err)
+
+		wo.Write([]byte("hello 1"))
+
+		wo.RekeyNext()
+
+		wo.Write([]byte("hello 2"))
+
+		wo.Write([]byte("hello 3"))
+	}()
+
+	c, err := net.Dial("tcp", l.Addr().String())
+	defer c.Close()
+
+	wc, err := NewClient(c)
+	assert.NoError(t, err)
+
+	buf := make([]byte, 7)
+
+	firstKey := make([]byte, 32)
+
+	copy(firstKey, (*wc.shared)[:])
+
+	wc.Read(buf)
+	wc.Read(buf)
+
+	n, err := wc.Read(buf)
+	assert.Equal(t, 7, n)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("hello 3"), buf[:n])
+
+	wg.Wait()
+}
