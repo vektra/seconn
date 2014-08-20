@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"crypto/aes"
 	"crypto/cipher"
@@ -25,7 +26,9 @@ var WriteBufferSize = 128
 // How many bytes to write over the connection before we rekey
 // This is bidirectional, so it will trip whenever either side
 // has sent this ammount.
-var RekeyAfterBytes = 1024 * 1024
+var RekeyAfterBytes = 100 * 1024 * 1024
+
+var KeyValidityPeriod = 1 * time.Hour
 
 var ErrBadMac = errors.New("bad mac detected")
 
@@ -42,10 +45,12 @@ type Conn struct {
 	peerKey *[32]byte
 	shared  *[32]byte
 
-	server    bool
-	writeBuf  []byte
-	readBuf   bytes.Buffer
-	rekeyLeft int
+	server   bool
+	writeBuf []byte
+	readBuf  bytes.Buffer
+
+	rekeyAfter time.Time
+	rekeyLeft  int
 
 	writeLock sync.Mutex
 
@@ -276,6 +281,8 @@ func (c *Conn) Negotiate(server bool) error {
 
 	c.read.setup(sharedKey, iv)
 	c.write.setup(sharedKey, iv)
+
+	c.rekeyAfter = time.Now().Add(KeyValidityPeriod)
 
 	return nil
 }
@@ -516,6 +523,9 @@ retry:
 }
 
 func (c *Conn) startRekey() error {
+	c.rekeyLeft = RekeyAfterBytes
+	c.rekeyAfter = time.Now().Add(KeyValidityPeriod)
+
 	pub, priv, err := GenerateKey(rand.Reader)
 	if err != nil {
 		return err
@@ -728,8 +738,8 @@ func (c *Conn) Write(buf []byte) (int, error) {
 
 	var err error
 
-	if c.server {
-		if c.rekeyLeft <= 0 {
+	if c.server && c.nextPeerKey == nil {
+		if c.rekeyLeft <= 0 || time.Now().After(c.rekeyAfter) {
 			err = c.startRekey()
 		} else {
 			c.rekeyLeft -= len(buf)
