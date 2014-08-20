@@ -38,6 +38,13 @@ var ErrProtocolError = errors.New("protocol error")
 
 const cKeySize = 32
 
+const (
+	pData            uint32 = 0
+	pStartRekey      uint32 = 1
+	pClientKeyUpdate uint32 = 2
+	pFinalizeRekey   uint32 = 3
+)
+
 type Conn struct {
 	net.Conn
 	privKey *[32]byte
@@ -287,42 +294,51 @@ func (c *Conn) Negotiate(server bool) error {
 	return nil
 }
 
-func (c *Conn) readRekey(cnt uint32) error {
+func (c *Conn) readAndCheck(cnt uint32) ([]byte, error) {
 	buf := make([]byte, cnt)
 
 	n, err := io.ReadFull(c.Conn, buf)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if n != int(cnt) {
-		return io.ErrShortBuffer
+		return nil, io.ErrShortBuffer
 	}
 
 	c.read.macPayload(buf)
 
 	n, err = io.ReadFull(c.Conn, c.read.dbuf)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if n != len(c.read.dbuf) {
-		return io.ErrShortBuffer
+		return nil, io.ErrShortBuffer
 	}
 
 	localMac := c.read.macFinish()
 
 	if subtle.ConstantTimeCompare(localMac, c.read.dbuf) != 1 {
-		return ErrBadMac
+		return nil, ErrBadMac
 	}
 
 	c.read.stream.XORKeyStream(buf, buf)
 
+	c.read.incSeq()
+
+	return buf, nil
+}
+
+func (c *Conn) readRekey(cnt uint32) error {
+	buf, err := c.readAndCheck(cnt)
+	if err != nil {
+		return err
+	}
+
 	if len(buf) != cKeySize+aes.BlockSize {
 		return ErrBadRekey
 	}
-
-	c.read.incSeq()
 
 	c.nextPeerKey = new([32]byte)
 	copy((*c.nextPeerKey)[:], buf[:cKeySize])
@@ -333,41 +349,14 @@ func (c *Conn) readRekey(cnt uint32) error {
 }
 
 func (c *Conn) readServerRekeyed(cnt uint32) error {
-	buf := make([]byte, cnt)
-
-	n, err := io.ReadFull(c.Conn, buf)
+	buf, err := c.readAndCheck(cnt)
 	if err != nil {
 		return err
 	}
-
-	if n != int(cnt) {
-		return io.ErrShortBuffer
-	}
-
-	c.read.macPayload(buf)
-
-	n, err = io.ReadFull(c.Conn, c.read.dbuf)
-	if err != nil {
-		return err
-	}
-
-	if n != len(c.read.dbuf) {
-		return io.ErrShortBuffer
-	}
-
-	localMac := c.read.macFinish()
-
-	if subtle.ConstantTimeCompare(localMac, c.read.dbuf) != 1 {
-		return ErrBadMac
-	}
-
-	c.read.stream.XORKeyStream(buf, buf)
 
 	if len(buf) != cKeySize {
 		return ErrBadRekey
 	}
-
-	c.read.incSeq()
 
 	c.nextPeerKey = new([32]byte)
 	copy((*c.nextPeerKey)[:], buf[:cKeySize])
@@ -382,22 +371,14 @@ func (c *Conn) readServerRekeyed(cnt uint32) error {
 }
 
 func (c *Conn) readClientRekeyFinal(size uint32) error {
-	n, err := io.ReadFull(c.Conn, c.read.dbuf)
+	buf, err := c.readAndCheck(size)
 	if err != nil {
 		return err
 	}
 
-	if n != len(c.read.dbuf) {
-		return io.ErrShortBuffer
+	if len(buf) != 0 {
+		return ErrBadRekey
 	}
-
-	localMac := c.read.macFinish()
-
-	if subtle.ConstantTimeCompare(localMac, c.read.dbuf) != 1 {
-		return ErrBadMac
-	}
-
-	c.read.incSeq()
 
 	c.read.setup((*c.nextShared)[:], c.nextIv)
 
@@ -448,21 +429,21 @@ retry:
 	cnt = cnt >> 8
 
 	switch cmd {
-	case 0:
+	case pData:
 		// it's normal data, handled below
-	case 1:
+	case pStartRekey:
 		err = c.readRekey(cnt)
 		if err != nil {
 			return 0, err
 		}
 		goto retry
-	case 2:
+	case pClientKeyUpdate:
 		err = c.readServerRekeyed(cnt)
 		if err != nil {
 			return 0, err
 		}
 		goto retry
-	case 3:
+	case pFinalizeRekey:
 		err = c.readClientRekeyFinal(cnt)
 		if err != nil {
 			return 0, err
@@ -554,7 +535,7 @@ func (c *Conn) startRekey() error {
 
 	header := headerData[:]
 
-	headerInt := uint32(1) | uint32(buf.Len()<<8)
+	headerInt := pStartRekey | uint32(buf.Len()<<8)
 
 	binary.BigEndian.PutUint32(header, headerInt)
 
@@ -621,7 +602,7 @@ func (c *Conn) sendClientRekey() error {
 
 	header := headerData[:]
 
-	headerInt := uint32(2) | uint32(buf.Len()<<8)
+	headerInt := pClientKeyUpdate | uint32(buf.Len()<<8)
 
 	binary.BigEndian.PutUint32(header, headerInt)
 
@@ -681,7 +662,7 @@ func (c *Conn) sendServerRekeyed() error {
 
 	header := headerData[:]
 
-	headerInt := uint32(3)
+	headerInt := pFinalizeRekey
 
 	binary.BigEndian.PutUint32(header, headerInt)
 
