@@ -518,6 +518,60 @@ retry:
 	return read, nil
 }
 
+func (c *Conn) sendBuffer(cmd uint32, buf *bytes.Buffer) error {
+	var headerData [4]byte
+
+	header := headerData[:]
+
+	headerInt := cmd | uint32(buf.Len()<<8)
+
+	binary.BigEndian.PutUint32(header, headerInt)
+
+	c.writeLock.Lock()
+	defer c.writeLock.Unlock()
+
+	c.write.stream.XORKeyStream(header, header)
+
+	n, err := c.Conn.Write(header)
+	if err != nil {
+		return err
+	}
+
+	if n != len(header) {
+		return io.ErrShortWrite
+	}
+
+	c.write.macStart(header)
+
+	c.write.stream.XORKeyStream(buf.Bytes(), buf.Bytes())
+
+	c.write.macPayload(buf.Bytes())
+
+	n, err = c.Conn.Write(buf.Bytes())
+	if err != nil {
+		return err
+	}
+
+	if n != buf.Len() {
+		return io.ErrShortWrite
+	}
+
+	cmac := c.write.macFinish()
+
+	n, err = c.Conn.Write(cmac)
+	if err != nil {
+		return err
+	}
+
+	if n != len(cmac) {
+		return io.ErrShortWrite
+	}
+
+	c.write.incSeq()
+
+	return nil
+}
+
 func (c *Conn) startRekey() error {
 	c.rekeyLeft = RekeyAfterBytes
 	c.rekeyAfter = time.Now().Add(KeyValidityPeriod)
@@ -546,57 +600,10 @@ func (c *Conn) startRekey() error {
 	buf.Write((*pub)[:])
 	buf.Write(iv)
 
-	var headerData [4]byte
-
-	header := headerData[:]
-
-	headerInt := pStartRekey | uint32(buf.Len()<<8)
-
-	binary.BigEndian.PutUint32(header, headerInt)
-
-	c.writeLock.Lock()
-	defer c.writeLock.Unlock()
-
-	c.write.stream.XORKeyStream(header, header)
-
-	c.write.macStart(header)
-
-	n, err = c.Conn.Write(header)
+	err = c.sendBuffer(pStartRekey, &buf)
 	if err != nil {
 		return err
 	}
-
-	if n != len(header) {
-		return io.ErrShortWrite
-	}
-
-	c.write.stream.XORKeyStream(buf.Bytes(), buf.Bytes())
-
-	c.write.macPayload(buf.Bytes())
-
-	n, err = c.Conn.Write(buf.Bytes())
-	if err != nil {
-		return err
-	}
-
-	if n != buf.Len() {
-		return io.ErrShortWrite
-	}
-
-	cmac := c.write.macFinish()
-
-	n, err = c.Conn.Write(cmac)
-	if err != nil {
-		return err
-	}
-
-	if n != len(cmac) {
-		return io.ErrShortWrite
-	}
-
-	c.write.incSeq()
-
-	c.rekeyLeft = RekeyAfterBytes
 
 	return nil
 }
@@ -613,55 +620,10 @@ func (c *Conn) sendClientRekey() error {
 	var buf bytes.Buffer
 	buf.Write((*pub)[:])
 
-	var headerData [4]byte
-
-	header := headerData[:]
-
-	headerInt := pClientKeyUpdate | uint32(buf.Len()<<8)
-
-	binary.BigEndian.PutUint32(header, headerInt)
-
-	c.writeLock.Lock()
-	defer c.writeLock.Unlock()
-
-	c.write.stream.XORKeyStream(header, header)
-
-	n, err := c.Conn.Write(header)
+	err = c.sendBuffer(pClientKeyUpdate, &buf)
 	if err != nil {
 		return err
 	}
-
-	if n != len(header) {
-		return io.ErrShortWrite
-	}
-
-	c.write.macStart(header)
-
-	c.write.stream.XORKeyStream(buf.Bytes(), buf.Bytes())
-
-	c.write.macPayload(buf.Bytes())
-
-	n, err = c.Conn.Write(buf.Bytes())
-	if err != nil {
-		return err
-	}
-
-	if n != buf.Len() {
-		return io.ErrShortWrite
-	}
-
-	cmac := c.write.macFinish()
-
-	n, err = c.Conn.Write(cmac)
-	if err != nil {
-		return err
-	}
-
-	if n != len(cmac) {
-		return io.ErrShortWrite
-	}
-
-	c.write.incSeq()
 
 	c.nextShared = new([32]byte)
 
@@ -676,42 +638,12 @@ func (c *Conn) sendClientRekey() error {
 }
 
 func (c *Conn) sendServerRekeyed() error {
-	var headerData [4]byte
+	var buf bytes.Buffer
 
-	header := headerData[:]
-
-	headerInt := pFinalizeRekey
-
-	binary.BigEndian.PutUint32(header, headerInt)
-
-	c.writeLock.Lock()
-	defer c.writeLock.Unlock()
-
-	c.write.stream.XORKeyStream(header, header)
-
-	c.write.macStart(header)
-
-	n, err := c.Conn.Write(header)
+	err := c.sendBuffer(pFinalizeRekey, &buf)
 	if err != nil {
 		return err
 	}
-
-	if n != len(header) {
-		return io.ErrShortWrite
-	}
-
-	cmac := c.write.macFinish()
-
-	n, err = c.Conn.Write(cmac)
-	if err != nil {
-		return err
-	}
-
-	if n != len(cmac) {
-		return io.ErrShortWrite
-	}
-
-	c.write.incSeq()
 
 	c.write.setup(c.nextKeys[aes.BlockSize:], c.nextIv)
 
