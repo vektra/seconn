@@ -15,9 +15,11 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/subtle"
 
 	"code.google.com/p/go.crypto/curve25519"
+	"code.google.com/p/go.crypto/pbkdf2"
 )
 
 // The size of the internal encrypted write buffer
@@ -68,6 +70,7 @@ type Conn struct {
 	nextPrivKey *[32]byte
 	nextPeerKey *[32]byte
 	nextShared  *[32]byte
+	nextKeys    []byte
 	nextIv      []byte
 }
 
@@ -286,8 +289,15 @@ func (c *Conn) Negotiate(server bool) error {
 
 	sharedKey := (*c.shared)[:]
 
-	c.read.setup(sharedKey, iv)
-	c.write.setup(sharedKey, iv)
+	newKeys := pbkdf2.Key(sharedKey, iv, 4096, aes.BlockSize*2, sha512.New)
+
+	if c.server {
+		c.read.setup(newKeys[:aes.BlockSize], iv)
+		c.write.setup(newKeys[aes.BlockSize:], iv)
+	} else {
+		c.read.setup(newKeys[aes.BlockSize:], iv)
+		c.write.setup(newKeys[:aes.BlockSize], iv)
+	}
 
 	c.rekeyAfter = time.Now().Add(KeyValidityPeriod)
 
@@ -365,7 +375,11 @@ func (c *Conn) readServerRekeyed(cnt uint32) error {
 
 	curve25519.ScalarMult(c.nextShared, c.nextPrivKey, c.nextPeerKey)
 
-	c.read.setup((*c.nextShared)[:], c.nextIv)
+	sharedKey := (*c.nextShared)[:]
+
+	c.nextKeys = pbkdf2.Key(sharedKey, c.nextIv, 4096, aes.BlockSize*2, sha512.New)
+
+	c.read.setup(c.nextKeys[:aes.BlockSize], c.nextIv)
 
 	return c.sendServerRekeyed()
 }
@@ -380,7 +394,7 @@ func (c *Conn) readClientRekeyFinal(size uint32) error {
 		return ErrBadRekey
 	}
 
-	c.read.setup((*c.nextShared)[:], c.nextIv)
+	c.read.setup(c.nextKeys[aes.BlockSize:], c.nextIv)
 
 	c.shared = c.nextShared
 	c.privKey = c.nextPrivKey
@@ -392,6 +406,7 @@ func (c *Conn) readClientRekeyFinal(size uint32) error {
 	c.nextPeerKey = nil
 	c.nextPeerKey = nil
 	c.nextIv = nil
+	c.nextKeys = nil
 
 	return nil
 }
@@ -652,7 +667,10 @@ func (c *Conn) sendClientRekey() error {
 
 	curve25519.ScalarMult(c.nextShared, c.nextPrivKey, c.nextPeerKey)
 
-	c.write.setup((*c.nextShared)[:], c.nextIv)
+	sharedKey := (*c.nextShared)[:]
+
+	c.nextKeys = pbkdf2.Key(sharedKey, c.nextIv, 4096, aes.BlockSize*2, sha512.New)
+	c.write.setup(c.nextKeys[:aes.BlockSize], c.nextIv)
 
 	return nil
 }
@@ -695,7 +713,7 @@ func (c *Conn) sendServerRekeyed() error {
 
 	c.write.incSeq()
 
-	c.write.setup((*c.nextShared)[:], c.nextIv)
+	c.write.setup(c.nextKeys[aes.BlockSize:], c.nextIv)
 
 	c.shared = c.nextShared
 	c.privKey = c.nextPrivKey
@@ -707,6 +725,7 @@ func (c *Conn) sendServerRekeyed() error {
 	c.nextPeerKey = nil
 	c.nextPeerKey = nil
 	c.nextIv = nil
+	c.nextKeys = nil
 
 	return nil
 }
