@@ -304,6 +304,28 @@ func (c *Conn) Negotiate(server bool) error {
 	return nil
 }
 
+// A token that can be compared with the other sides PeerAuthToken
+// to validate that both sides are talking to who they think they're talking
+// too.
+//
+// The token needs to be authenticated across the connection because
+// seconn doesn't detect a rogue man-in-the-middle. This token is in fact
+// used to detect a man-in-the-middle.
+
+func (c *Conn) AuthToken() []byte {
+	mac := hmac.New(sha256.New, (*c.shared)[:])
+	mac.Write((*c.pubKey)[:])
+	return mac.Sum(nil)
+}
+
+// See AuthToken(). This is the AuthToken for the other side of the connection.
+
+func (c *Conn) PeerAuthToken() []byte {
+	mac := hmac.New(sha256.New, (*c.shared)[:])
+	mac.Write((*c.peerKey)[:])
+	return mac.Sum(nil)
+}
+
 func (c *Conn) readAndCheck(cnt uint32) ([]byte, error) {
 	buf := make([]byte, cnt)
 

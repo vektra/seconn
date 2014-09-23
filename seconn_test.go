@@ -1,7 +1,9 @@
 package seconn
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"io"
 	"net"
 	"sync"
@@ -481,6 +483,48 @@ func TestSeconnReKeyDoesntSwitchTooEarly(t *testing.T) {
 	assert.Equal(t, 7, n)
 	assert.NoError(t, err)
 	assert.Equal(t, []byte("hello 3"), buf[:n])
+
+	wg.Wait()
+}
+
+func TestSeconnAuthToken(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	defer l.Close()
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		o, err := l.Accept()
+		defer o.Close()
+
+		wo, err := NewServer(o)
+		assert.NoError(t, err)
+
+		n, err := wo.Write([]byte("hello"))
+		assert.NoError(t, err)
+		assert.Equal(t, 5, n)
+	}()
+
+	c, err := net.Dial("tcp", l.Addr().String())
+	defer c.Close()
+
+	wc, err := NewClient(c)
+	assert.NoError(t, err)
+
+	mac := hmac.New(sha256.New, (*wc.shared)[:])
+	mac.Write((*wc.pubKey)[:])
+	expected := mac.Sum(nil)
+
+	assert.Equal(t, expected, wc.AuthToken())
+
+	mc2 := hmac.New(sha256.New, (*wc.shared)[:])
+	mc2.Write((*wc.peerKey)[:])
+	expected2 := mc2.Sum(nil)
+
+	assert.Equal(t, expected2, wc.PeerAuthToken())
 
 	wg.Wait()
 }
