@@ -247,8 +247,8 @@ func TestSeconnReKeyBasic(t *testing.T) {
 	assert.Equal(t, []byte("hello 1"), buf[:n])
 
 	n, err = wc.Read(buf)
-	assert.Equal(t, 7, n)
 	assert.NoError(t, err)
+	assert.Equal(t, 7, n)
 	assert.Equal(t, []byte("hello 2"), buf[:n])
 
 	n, err = wc.Write([]byte("hello 3"))
@@ -320,13 +320,12 @@ func TestSeconnReadBuffersProperly(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, data[:n], buf[:n])
 
-	assert.Equal(t, len(data)-16, len(wc.readBuf.Bytes()))
-
 	buf = make([]byte, len(data))
 
 	n, err = wc.Read(buf)
 	assert.NoError(t, err)
-	assert.Equal(t, data[16:], buf[:n])
+	assert.Equal(t, WriteBufferSize-16, n)
+	assert.Equal(t, data[16:16+n], buf[:n])
 	assert.Equal(t, 0, wc.readBuf.Len())
 
 	wg.Wait()
