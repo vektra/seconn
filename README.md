@@ -7,9 +7,9 @@ a net.Conn.
 It uses curve25519 to establish a shared key between the 2 parties and then
 uses AES encryption to pass the data back and forth.
 
-Why doesn't it do auth?
-=======================
+How do a do any kind of authentication to prevent a MITM attack?
+================================================================
 
-I believe that authentication is a layer that should happen on top of encryption,
-not intertwinned with it. Thusly seconn provides a simple GetMessage/SendMessage
-api to easily implement any authentication scheme desired.
+Check out the `auth` package. It uses the GetMessage/SendMessage API
+to perform a signed token exchange and verifies that the server side
+is using the agreed upon key.
